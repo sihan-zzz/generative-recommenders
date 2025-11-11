@@ -81,7 +81,73 @@ def movielens_seq_features_from_row(
             index=historical_lengths.view(-1, 1),
             src=target_timestamps.view(-1, 1),
         )
-        # print(f"historical_ids.size()={historical_ids.size()}, historical_timestamps.size()={historical_timestamps.size()}")
+    features = SequentialFeatures(
+        past_lengths=historical_lengths,
+        past_ids=historical_ids,
+        past_embeddings=None,
+        past_payloads={
+            "timestamps": historical_timestamps,
+            "ratings": historical_ratings,
+        },
+    )
+    return features, target_ids, target_ratings
+
+
+def engage_seq_features_from_row(
+    row: Dict[str, torch.Tensor],
+    device: int,
+    max_output_length: int,
+) -> Tuple[SequentialFeatures, torch.Tensor, torch.Tensor]:
+    """Extract features from engage_seq_v4 data format.
+
+    This function is similar to movielens_seq_features_from_row but adapted
+    for the engage_seq_v4 dataset which uses ad_id instead of movie_id.
+    """
+    historical_lengths = row["history_lengths"].to(device)  # [B]
+    historical_ids = row["historical_ids"].to(device)  # [B, N]
+    historical_ratings = row["historical_ratings"].to(device)
+    historical_timestamps = row["historical_timestamps"].to(device)
+    target_ids = row["target_ids"].to(device).unsqueeze(1)  # [B, 1]
+    target_ratings = row["target_ratings"].to(device).unsqueeze(1)
+    target_timestamps = row["target_timestamps"].to(device).unsqueeze(1)
+    if max_output_length > 0:
+        B = historical_lengths.size(0)
+        historical_ids = torch.cat(
+            [
+                historical_ids,
+                torch.zeros(
+                    (B, max_output_length), dtype=historical_ids.dtype, device=device
+                ),
+            ],
+            dim=1,
+        )
+        historical_ratings = torch.cat(
+            [
+                historical_ratings,
+                torch.zeros(
+                    (B, max_output_length),
+                    dtype=historical_ratings.dtype,
+                    device=device,
+                ),
+            ],
+            dim=1,
+        )
+        historical_timestamps = torch.cat(
+            [
+                historical_timestamps,
+                torch.zeros(
+                    (B, max_output_length),
+                    dtype=historical_timestamps.dtype,
+                    device=device,
+                ),
+            ],
+            dim=1,
+        )
+        historical_timestamps.scatter_(
+            dim=1,
+            index=historical_lengths.view(-1, 1),
+            src=target_timestamps.view(-1, 1),
+        )
     features = SequentialFeatures(
         past_lengths=historical_lengths,
         past_ids=historical_ids,

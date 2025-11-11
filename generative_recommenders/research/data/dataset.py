@@ -15,6 +15,8 @@
 # pyre-unsafe
 
 import csv
+import glob
+import json
 import linecache
 
 from typing import Dict, List, Optional, Tuple
@@ -247,3 +249,151 @@ class MultiFileDatasetV2(DatasetV2, torch.utils.data.Dataset):
         data = self._process_line(line)
         sample = self.load_item(data)
         return sample
+
+
+class EngageSeqDatasetV2(torch.utils.data.Dataset):
+    """Dataset for loading engage_seq_v4 JSONL files."""
+
+    def __init__(
+        self,
+        jsonl_file: str,
+        padding_length: int,
+        ignore_last_n: int,
+        chronological: bool = True,
+        sample_ratio: float = 1.0,
+    ) -> None:
+        """
+        Args:
+            jsonl_file (str): Path to the JSONL file (train.jsonl or eval.jsonl)
+            padding_length (int): Maximum sequence length
+            ignore_last_n (int): Number of last items to ignore (0 for eval, 1 for train)
+            chronological (bool): Whether to use chronological order
+            sample_ratio (float): Ratio of sequence to sample
+        """
+        super().__init__()
+        self._jsonl_file = jsonl_file
+        self._padding_length = padding_length
+        self._ignore_last_n = ignore_last_n
+        self._chronological = chronological
+        self._sample_ratio = sample_ratio
+        self._cache: Dict[int, Dict[str, torch.Tensor]] = dict()
+
+        # Count total number of users
+        with open(jsonl_file, "r") as f:
+            self._total_users = sum(1 for _ in f)
+
+    def __len__(self) -> int:
+        return self._total_users
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        if idx in self._cache:
+            return self._cache[idx]
+
+        # Read the line from the file (1-indexed for linecache)
+        line = linecache.getline(self._jsonl_file, idx + 1)
+        data = json.loads(line)
+
+        sample = self._load_item(data, idx)
+        self._cache[idx] = sample
+        return sample
+
+    def _load_item(self, data: Dict, user_id: int) -> Dict[str, torch.Tensor]:
+        """Load and process a single user's data."""
+        ad_ids = data.get("ad_id", [])
+        timestamps = data.get("conversion_timestamp", [])
+
+        # Hardcode all ratings to 4
+        ratings = [4] * len(ad_ids)
+
+        # Apply ignore_last_n
+        if self._ignore_last_n > 0:
+            ad_ids = ad_ids[: -self._ignore_last_n]
+            ratings = ratings[: -self._ignore_last_n]
+            timestamps = timestamps[: -self._ignore_last_n]
+
+        # Apply sampling if needed
+        if self._sample_ratio < 1.0:
+            raw_length = len(ad_ids)
+            sampling_kept_mask = (
+                torch.rand((raw_length,), dtype=torch.float32) < self._sample_ratio
+            ).tolist()
+            ad_ids = [x for x, kept in zip(ad_ids, sampling_kept_mask) if kept]
+            ratings = [x for x, kept in zip(ratings, sampling_kept_mask) if kept]
+            timestamps = [x for x, kept in zip(timestamps, sampling_kept_mask) if kept]
+
+        # Reverse for chronological order (most recent first in original data)
+        if not self._chronological:
+            ad_ids.reverse()
+            ratings.reverse()
+            timestamps.reverse()
+
+        # Split into history and target
+        if len(ad_ids) == 0:
+            # Handle empty sequences
+            historical_ids = []
+            historical_ratings = []
+            historical_timestamps = []
+            target_ids = 0
+            target_ratings = 0
+            target_timestamps = 0
+            history_length = 0
+        else:
+            if self._chronological:
+                # Most recent is last
+                target_ids = ad_ids[-1] if len(ad_ids) > 0 else 0
+                target_ratings = ratings[-1] if len(ratings) > 0 else 0
+                target_timestamps = timestamps[-1] if len(timestamps) > 0 else 0
+                historical_ids = ad_ids[:-1] if len(ad_ids) > 1 else []
+                historical_ratings = ratings[:-1] if len(ratings) > 1 else []
+                historical_timestamps = timestamps[:-1] if len(timestamps) > 1 else []
+            else:
+                # Most recent is first
+                target_ids = ad_ids[0]
+                target_ratings = ratings[0]
+                target_timestamps = timestamps[0]
+                historical_ids = ad_ids[1:]
+                historical_ratings = ratings[1:]
+                historical_timestamps = timestamps[1:]
+
+            history_length = len(historical_ids)
+
+        # Pad or truncate
+        max_seq_len = self._padding_length - 1
+
+        def _truncate_or_pad_seq(
+            y: List[int], target_len: int, chronological: bool
+        ) -> List[int]:
+            y_len = len(y)
+            if y_len < target_len:
+                y = y + [0] * (target_len - y_len)
+            else:
+                if not chronological:
+                    y = y[:target_len]
+                else:
+                    y = y[-target_len:]
+            assert len(y) == target_len
+            return y
+
+        historical_ids = _truncate_or_pad_seq(
+            historical_ids, max_seq_len, self._chronological
+        )
+        historical_ratings = _truncate_or_pad_seq(
+            historical_ratings, max_seq_len, self._chronological
+        )
+        historical_timestamps = _truncate_or_pad_seq(
+            historical_timestamps, max_seq_len, self._chronological
+        )
+        history_length = min(history_length, max_seq_len)
+
+        return {
+            "user_id": user_id,
+            "historical_ids": torch.tensor(historical_ids, dtype=torch.int64),
+            "historical_ratings": torch.tensor(historical_ratings, dtype=torch.int64),
+            "historical_timestamps": torch.tensor(
+                historical_timestamps, dtype=torch.int64
+            ),
+            "history_lengths": history_length,
+            "target_ids": target_ids,
+            "target_ratings": target_ratings,
+            "target_timestamps": target_timestamps,
+        }

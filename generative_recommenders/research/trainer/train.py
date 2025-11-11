@@ -14,11 +14,12 @@
 
 # pyre-unsafe
 
+import gc
 import logging
 import os
 import random
-
 import time
+import argparse
 
 from datetime import date
 from typing import Dict, Optional
@@ -34,7 +35,6 @@ from generative_recommenders.research.data.eval import (
     eval_metrics_v2_from_tensors,
     get_eval_state,
 )
-
 from generative_recommenders.research.data.reco_dataset import get_reco_dataset
 from generative_recommenders.research.indexing.utils import get_top_k_module
 from generative_recommenders.research.modeling.sequential.autoregressive_losses import (
@@ -50,6 +50,7 @@ from generative_recommenders.research.modeling.sequential.encoder_utils import (
     get_sequential_encoder,
 )
 from generative_recommenders.research.modeling.sequential.features import (
+    engage_seq_features_from_row,
     movielens_seq_features_from_row,
 )
 from generative_recommenders.research.modeling.sequential.input_features_preprocessors import (
@@ -82,6 +83,32 @@ def cleanup() -> None:
     dist.destroy_process_group()
 
 
+def log_cuda_memory_stats(device: int = 0, prefix: str = "") -> None:
+    """
+    Log CUDA memory statistics for debugging and monitoring.
+
+    Args:
+        device: CUDA device index to log stats for (default: 0)
+        prefix: Optional prefix string to add to the log message (default: "")
+    """
+
+    # Convert memory from bytes to MB for readability
+    allocated = torch.cuda.memory_allocated(device) / (1024**3)
+    reserved = torch.cuda.memory_reserved(device) / (1024**3)
+    max_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
+    max_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
+
+    prefix_str = f"[{prefix}] " if prefix else ""
+
+    logging.info(
+        f"{prefix_str} (Device {device}):"
+        f"  Allocated: {allocated:.2f} GB"
+        f"  Reserved: {reserved:.2f} GB"
+        f"  Max Allocated: {max_allocated:.2f} GB"
+        f"  Max Reserved: {max_reserved:.2f} GB"
+    )
+
+
 @gin.configurable
 def get_weighted_loss(
     main_loss: torch.Tensor,
@@ -99,7 +126,7 @@ def get_weighted_loss(
 def train_fn(
     rank: int,
     world_size: int,
-    master_port: int,
+    # master_port: int,
     dataset_name: str = "ml-20m",
     max_sequence_length: int = 200,
     positional_sampling_ratio: float = 1.0,
@@ -134,6 +161,19 @@ def train_fn(
     enable_tf32: bool = False,
     random_seed: int = 42,
 ) -> None:
+    # Configure logging to include time, file, and line number
+    logging.basicConfig(
+        format="%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        force=True,
+    ) 
+
+    if rank == 0:
+        # log all input args    
+        logging.info("Training configuration:")
+        for arg, value in gin.config._CONFIG.items():
+            logging.info(f"  {arg}: {value}")
+            
     # to enable more deterministic results.
     random.seed(random_seed)
     torch.backends.cuda.matmul.allow_tf32 = enable_tf32
@@ -141,7 +181,7 @@ def train_fn(
     logging.info(f"cuda.matmul.allow_tf32: {enable_tf32}")
     logging.info(f"cudnn.allow_tf32: {enable_tf32}")
     logging.info(f"Training model on rank {rank}.")
-    setup(rank, world_size, master_port)
+    # setup(rank, world_size, master_port)
 
     dataset = get_reco_dataset(
         dataset_name=dataset_name,
@@ -267,6 +307,7 @@ def train_fn(
     ar_loss = ar_loss.to(device)
     negatives_sampler = negatives_sampler.to(device)
     model = DDP(model, device_ids=[rank], broadcast_buffers=False)
+    logging.info(f"rank {rank}: Model created")
 
     # TODO: wrap in create_optimizer.
     opt = torch.optim.AdamW(
@@ -275,6 +316,7 @@ def train_fn(
         betas=(0.9, 0.98),
         weight_decay=weight_decay,
     )
+    logging.info(f"rank {rank}: Optimizer created")
 
     date_str = date.today().strftime("%Y-%m-%d")
     model_subfolder = f"{dataset_name}-l{max_sequence_length}"
@@ -283,6 +325,7 @@ def train_fn(
         + f"/{model_debug_str}_{interaction_module_debug_str}_{sampling_debug_str}_{loss_debug_str}"
         + f"{f'-ddp{world_size}' if world_size > 1 else ''}-b{local_batch_size}-lr{learning_rate}-wu{num_warmup_steps}-wd{weight_decay}{'' if enable_tf32 else '-notf32'}-{date_str}"
     )
+    logging.info(model_desc)
     if full_eval_every_n > 1:
         model_desc += f"-fe{full_eval_every_n}"
     if positional_sampling_ratio is not None and positional_sampling_ratio < 1:
@@ -304,21 +347,38 @@ def train_fn(
     batch_id = 0
     epoch = 0
     for epoch in range(num_epochs):
+        logging.info(f"rank {rank}: starting epoch {epoch}")
+        # log_cuda_memory_stats(prefix="iter start")
         if train_data_sampler is not None:
             train_data_sampler.set_epoch(epoch)
         if eval_data_sampler is not None:
             eval_data_sampler.set_epoch(epoch)
         model.train()
         for row in iter(train_data_loader):
-            seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
-                row,
-                device=device,
-                max_output_length=gr_output_length + 1,
-            )
+            # Use appropriate feature extraction based on dataset
+            if dataset_name == "engage_seq_v4":
+                seq_features, target_ids, target_ratings = engage_seq_features_from_row(
+                    row,
+                    device=device,
+                    max_output_length=gr_output_length + 1,
+                )
+            else:
+                seq_features, target_ids, target_ratings = (
+                    movielens_seq_features_from_row(
+                        row,
+                        device=device,
+                        max_output_length=gr_output_length + 1,
+                    )
+                )
 
             if (batch_id % eval_interval) == 0:
                 model.eval()
 
+                # log_cuda_memory_stats(prefix="before eval, before cleaning")
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                # log_cuda_memory_stats(prefix="before eval, after cleaning")
                 eval_state = get_eval_state(
                     model=model.module,
                     all_item_ids=dataset.all_item_ids,
@@ -428,6 +488,7 @@ def train_fn(
 
             opt.step()
 
+            # log_cuda_memory_stats(prefix="after opt step")
             batch_id += 1
 
         def is_full_eval(epoch: int) -> bool:
@@ -451,9 +512,17 @@ def train_fn(
             float_dtype=torch.bfloat16 if main_module_bf16 else None,
         )
         for eval_iter, row in enumerate(iter(eval_data_loader)):
-            seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
-                row, device=device, max_output_length=gr_output_length + 1
-            )
+            # Use appropriate feature extraction based on dataset
+            if dataset_name == "engage_seq_v4":
+                seq_features, target_ids, target_ratings = engage_seq_features_from_row(
+                    row, device=device, max_output_length=gr_output_length + 1
+                )
+            else:
+                seq_features, target_ids, target_ratings = (
+                    movielens_seq_features_from_row(
+                        row, device=device, max_output_length=gr_output_length + 1
+                    )
+                )
             eval_dict = eval_metrics_v2_from_tensors(
                 eval_state,
                 model.module,
@@ -535,3 +604,19 @@ def train_fn(
         )
 
     cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train generative recommender model with gin config.")
+    parser.add_argument("--gin_config_file", type=str, required=True, help="Path to gin config file.")
+    args = parser.parse_args()
+    gin.parse_config_file(args.gin_config_file)
+
+    if not dist.is_initialized():
+        dist.init_process_group("nccl")
+        
+    train_fn(rank=dist.get_rank(), world_size=dist.get_world_size())
+
+
+if __name__ == "__main__":
+    main()

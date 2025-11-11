@@ -21,7 +21,11 @@ import pandas as pd
 
 import torch
 
-from generative_recommenders.research.data.dataset import DatasetV2, MultiFileDatasetV2
+from generative_recommenders.research.data.dataset import (
+    DatasetV2,
+    EngageSeqDatasetV2,
+    MultiFileDatasetV2,
+)
 from generative_recommenders.research.data.item_features import ItemFeatures
 from generative_recommenders.research.data.preprocessor import get_common_preprocessors
 
@@ -104,6 +108,30 @@ def get_reco_dataset(
             shift_id_by=1,  # [0..n-1] -> [1..n]
             chronological=chronological,
         )
+    elif dataset_name == "engage_seq_v4":
+        dp = get_common_preprocessors()[dataset_name]
+        # Load metadata to get dataset statistics
+        import json
+        import os
+
+        metadata_path = os.path.join(dp.data_path(), "metadata.json")
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        train_dataset = EngageSeqDatasetV2(
+            jsonl_file=os.path.join(dp.data_path(), "train.jsonl"),
+            padding_length=max_sequence_length + 1,  # target
+            ignore_last_n=1,
+            chronological=chronological,
+            sample_ratio=positional_sampling_ratio,
+        )
+        eval_dataset = EngageSeqDatasetV2(
+            jsonl_file=os.path.join(dp.data_path(), "eval.jsonl"),
+            padding_length=max_sequence_length + 1,  # target
+            ignore_last_n=0,
+            chronological=chronological,
+            sample_ratio=1.0,  # do not sample
+        )
     else:
         raise ValueError(f"Unknown dataset {dataset_name}")
 
@@ -162,17 +190,34 @@ def get_reco_dataset(
         max_item_id = dp.expected_max_item_id()
         for x in all_item_ids:
             assert x > 0, "x in all_item_ids should be positive"
+    elif dataset_name == "engage_seq_v4":
+        # For engage_seq_v4, use metadata from preprocessing
+        item_features = None
+        max_item_id = metadata["max_ad_id"]
+        num_unique_items = metadata["num_unique_ads"]
+        # Create all_item_ids list (1-indexed)
+        all_item_ids = [x for x in range(1, max_item_id + 1)]
     else:
         # expected_max_item_id and item_features are not set for Amazon datasets.
         item_features = None
         max_item_id = dp.expected_num_unique_items()
         all_item_ids = [x + 1 for x in range(max_item_id)]  # pyre-ignore [6]
 
-    return RecoDataset(
-        max_sequence_length=max_sequence_length,
-        num_unique_items=dp.expected_num_unique_items(),  # pyre-ignore [6]
-        max_item_id=max_item_id,  # pyre-ignore [6]
-        all_item_ids=all_item_ids,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-    )
+    if dataset_name == "engage_seq_v4":
+        return RecoDataset(
+            max_sequence_length=max_sequence_length,
+            num_unique_items=num_unique_items,
+            max_item_id=max_item_id,
+            all_item_ids=all_item_ids,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    else:
+        return RecoDataset(
+            max_sequence_length=max_sequence_length,
+            num_unique_items=dp.expected_num_unique_items(),  # pyre-ignore [6]
+            max_item_id=max_item_id,  # pyre-ignore [6]
+            all_item_ids=all_item_ids,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )

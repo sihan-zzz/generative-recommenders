@@ -430,14 +430,33 @@ class AmazonDataProcessor(DataProcessor):
         return num_unique_items
 
 
-def get_common_preprocessors() -> (
-    Dict[
-        str,
-        Union[
-            AmazonDataProcessor, MovielensDataProcessor, MovielensSyntheticDataProcessor
-        ],
-    ]
-):
+class EngageSeqDataProcessor(DataProcessor):
+    def __init__(
+        self,
+        data_path: str,
+        prefix: str,
+        expected_num_unique_items: Optional[int] = None,
+        expected_max_item_id: Optional[int] = None,
+    ) -> None:
+        super().__init__(prefix, expected_num_unique_items, expected_max_item_id)
+        self._data_path = data_path
+
+    def processed_item_csv(self) -> str:
+        return ""
+
+    def data_path(self) -> str:
+        return self._data_path
+
+
+def get_common_preprocessors() -> Dict[
+    str,
+    Union[
+        AmazonDataProcessor,
+        MovielensDataProcessor,
+        MovielensSyntheticDataProcessor,
+        EngageSeqDataProcessor,
+    ],
+]:
     ml_1m_dp = MovielensDataProcessor(  # pyre-ignore [45]
         "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
         "tmp/movielens1m.zip",
@@ -471,10 +490,15 @@ def get_common_preprocessors() -> (
         prefix="amzn_books",
         expected_num_unique_items=695762,
     )
+    engage_seq_v4_dp = EngageSeqDataProcessor(
+        data_path=os.path.expanduser("/mnt/lustre/metavmds0lstre/data/engage_seq/engage_seq_v4_hstu"),
+        prefix="engage_seq_v4",
+    )
     return {
         "ml-1m": ml_1m_dp,
         "ml-20m": ml_20m_dp,
         "ml-1b": ml_1b_dp,
         "ml-3b": ml_3b_dp,
         "amzn-books": amzn_books_dp,
+        "engage_seq_v4": engage_seq_v4_dp,
     }

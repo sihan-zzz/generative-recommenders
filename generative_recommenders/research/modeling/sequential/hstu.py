@@ -23,7 +23,7 @@ Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for G
 import abc
 import math
 from typing import Callable, Dict, List, Optional, Tuple, Union
-
+import fbgemm_gpu
 import torch
 import torch.nn.functional as F
 
