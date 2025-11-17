@@ -16,4 +16,4 @@ torchrun \
   --nnodes=$SLURM_NNODES \
   --nproc-per-node=$SLURM_GPUS_PER_NODE \
   --node-rank=${NODE_RANK} \
-  ${TORCHRUN_TRAINER_SCRIPT}  --gin_config_file=${CONFIG_PATH}
+  ${TORCHRUN_TRAINER_SCRIPT} 

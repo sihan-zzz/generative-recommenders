@@ -121,6 +121,55 @@ def get_weighted_loss(
         weighted_loss = weighted_loss + cur_weighted_loss
     return weighted_loss
 
+def print_model_params(model, exclude_prefixes=None, exclude_contains=None):
+    """
+    Print model parameter counts, optionally excluding parameters
+    whose module names start with certain prefixes or contain substrings.
+
+    Args:
+        model (nn.Module): The model to inspect.
+        exclude_prefixes (list[str]): Exclude params where name.startswith(prefix).
+        exclude_contains (list[str]): Exclude params where substring is in name.
+    """
+
+    exclude_prefixes = exclude_prefixes or []
+    exclude_contains = exclude_contains or []
+
+    def should_exclude(name: str):
+        for p in exclude_prefixes:
+            if name.startswith(p):
+                return True
+        for s in exclude_contains:
+            if s in name:
+                return True
+        return False
+
+    total = 0
+    trainable = 0
+    excluded = 0
+
+    for name, p in model.named_parameters():
+        n = p.numel()
+        logging.info(f"Parameter: {name}, size: {n}, requires_grad: {p.requires_grad}")
+        total += n
+        if should_exclude(name):
+            excluded += n
+            continue
+        if p.requires_grad:
+            trainable += n
+
+    logging.info("------ Model Parameter Summary ------")
+    logging.info(f"Total parameters:        {total:,}")
+    logging.info(f"Trainable parameters:    {trainable:,}")
+    logging.info(f"Excluded parameters:     {excluded:,}")
+    logging.info("-------------------------------------")
+
+    return {
+        "total": total,
+        "trainable": trainable,
+        "excluded": excluded,
+    }
+
 
 @gin.configurable
 def train_fn(
@@ -254,7 +303,8 @@ def train_fn(
         verbose=True,
     )
     model_debug_str = model.debug_str()
-
+    if rank == 0:
+        print_model_params(model, exclude_contains=["embedding_module"])
     # loss
     loss_debug_str = loss_module
     if loss_module == "BCELoss":

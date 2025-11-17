@@ -51,20 +51,19 @@ export NCCL_IB_ADAPTIVE_ROUTING=1
 export NCCL_CROSS_NIC=0
 export MASTER_ADDR=$head_node_ip
 export MASTER_PORT=29501
-export TORCHRUN_TRAINER_SCRIPT=${WORK_DIR}/${TRAIN_SCRIPT}
 export NCCL_DEBUG=WARN
 # Command 1
 
 srun \
   --output $LOG_PREFIX/node_%t_${SLURM_RESTART_COUNT:-0}.out \
   --container-image /home/common/images/vmds-nemo-20250721.sqsh \
-  --container-mounts /usr/local/gib,$WORK_DIR,/home/sihanzeng_meta_com/miniconda3,/mnt/lustre/metavmds0lstre/data/engage_seq/engage_seq_v4_hstu \
+  --container-mounts /usr/local/gib,${WORK_DIR},${CONDA_DIR},${DATA_DIR},${OUTPUT_DIR} \
   --container-workdir $WORK_DIR \
   --kill-on-bad-exit=1 \
   --container-writable \
   --no-container-mount-home \
   --mpi=pmix \
-  bash -c "source /home/sihanzeng_meta_com/miniconda3/bin/activate hstu && $WORK_DIR/scripts/torchrun.cmd"
+  bash -c "source ${CONDA_DIR}/bin/activate ${ENV_NAME} && $WORK_DIR/cpt/scripts/torchrun.cmd"
 
 exitcode=$?
 
